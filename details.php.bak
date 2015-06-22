@@ -1,0 +1,103 @@
+<?php
+
+//Utility helpers for reading configurations and redis and mysql connectors
+require_once("helpers.php");
+
+// Call the init function to initialise the basic settings
+init();
+
+$id = isset( $_REQUEST["id"] ) ? $_REQUEST["id"] : NULL;
+
+if(valid_story_id($id))
+	publish_err("Id Error");
+
+$redis_con = get_redis_conn();
+if ($redis_con == NULL) {
+	log_debug("Could not connect to Redis");
+} else {
+	//Check for the value of the key in Redis
+	if ($redis_con -> exists( $id )){
+		publish_raw($redis_con -> get($id));
+		// Refresh the expiry time for the particular key
+		$redis_con -> expire($id, redis_story_expiry());
+		exit();
+	}
+}
+
+//This code would be executed only when the data was not present from cache
+
+//Try and connect to the MySQL database
+$mysql_con = get_mysql_conn( "stories" );
+
+if($mysql_con == NULL) {
+	publish_err("Could not connect to DB");
+}
+
+$output = array();
+//Now let's query the database and figure out date for this particular id
+if( $story_query = mysqli_prepare($mysql_con, "SELECT * FROM story WHERE story_id = ?") ) {
+	mysqli_stmt_bind_param($story_query, "d", $id);
+	mysqli_stmt_execute($story_query);
+	mysqli_stmt_bind_result($story_query, $db_story_id, $db_cover_pic, $db_title, $db_views, $db_lang, $db_filepath, $db_created_at);
+	$story_res = array();
+	while(mysqli_stmt_fetch($story_query)) {
+		//read the file from the path
+		$res = array();
+		$output["id"] = $db_story_id;
+		$res["language"] = $db_lang;
+		$res["title"] = $db_title;
+		$res["views"] = $db_views;
+		$res["created_at"] = $db_created_at;
+		$res["cover_pic"] = $db_cover_pic; 
+		$res["text"] = file_get_contents($db_filepath);
+		
+		//Push this result array in the output array object
+		array_push($story_res, $res);
+	}
+	$output["story"] = $story_res;
+	mysqli_stmt_close($story_query);
+}
+
+if( $category_query = mysqli_prepare($mysql_con, "SELECT category FROM categories WHERE story_id = ?") ){
+	mysqli_stmt_bind_param($category_query, "d", $id);
+	mysqli_stmt_execute($category_query);
+	mysqli_stmt_bind_result($category_query, $db_category);
+	$category_res = array();
+	while(mysqli_stmt_fetch($category_query)) {
+		array_push($category_res, $db_category);
+	}
+	$output["categories"] = implode(",", $category_res);
+	mysqli_stmt_close($category_query);
+}
+
+if( $author_query = mysqli_prepare($mysql_con, "SELECT a.firstname, a.lastname, a.image, a.link, a.description FROM authors AS a INNER JOIN story_authors AS sa WHERE a.author_id = sa.author_id AND sa.story_id = ?") ){
+	mysqli_stmt_bind_param($author_query, "d", $id);
+	mysqli_stmt_execute($author_query);
+	mysqli_stmt_bind_result($author_query, $db_fname, $db_lname, $db_img_link, $db_author_link, $db_author_desc);
+	$author_res = array();
+	while(mysqli_stmt_fetch($author_query)){
+		$res = array();
+		$res["firstname"] = $db_fname;
+		$res["lastname"] = $db_lname;
+		$res["img"] = $db_img_link;
+		$res["link"] = $db_author_link;
+		$res["desc"] = $db_author_desc;
+		array_push($author_res, $res);	
+	
+	}
+	$output["author"] = $author_res;
+	mysqli_stmt_close($author_query);
+}
+close_mysql_conn( $mysql_con );
+
+if(count($output) == 0){
+// This means that no result was found for this story id
+	publish_err("No result found");
+}else{
+	// Ideally redis time should be extremely small. This case hasn't been handled here
+	$json_res = publish($output);
+	
+	if($redis_con != NULL)
+		$redis_con -> setex($id, $config["redis"]["story_expiry"], $json_res);
+	
+}

@@ -1,0 +1,4 @@
+AuthUserFile /var/www/html/a/.htpasswd
+AuthType Basic
+AuthName "Knock Knock"
+Require valid-user
